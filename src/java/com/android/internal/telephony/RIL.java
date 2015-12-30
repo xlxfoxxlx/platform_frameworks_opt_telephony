@@ -337,6 +337,12 @@ public class RIL extends BaseCommands implements CommandsInterface {
 
     private static final int CDMA_BROADCAST_SMS_NO_OF_SERVICE_CATEGORIES = 31;
 
+    /* Custom Radio Access Family (RAF)
+     * Handle RAF in unified device trees (CDMA+GSM variants, unique source)
+     */
+    private String DEVICE_FAMILY = SystemProperties.get("ro.ril.device_family");
+    private static final String[] RAF_VALUES = {"GSM|WCDMA|LTE", "LTE|CDMA|EVDO"};
+
     private final DisplayManager.DisplayListener mDisplayListener =
             new DisplayManager.DisplayListener() {
         @Override
@@ -3065,8 +3071,19 @@ public class RIL extends BaseCommands implements CommandsInterface {
         // default to UNKNOWN so we fail fast.
         int raf = RadioAccessFamily.RAF_UNKNOWN;
 
-        String rafString = mContext.getResources().getString(
+	// Custom RAF
+	String rafString = null;
+	if (DEVICE_FAMILY.equals("gsm")) {
+	    rafString = RAF_VALUES[0];
+	} else if (DEVICE_FAMILY.equals("cdma")) {
+	    rafString = RAF_VALUES[1];
+	} else {
+	    // Custom RAF unspecified, read from overlay
+	    rafString = mContext.getResources().getString(
                 com.android.internal.R.string.config_radio_access_family);
+	}
+	if (RILJ_LOGD) riljLog("Radio Access Family: " + rafString);
+
         if (TextUtils.isEmpty(rafString) == false) {
             raf = RadioAccessFamily.rafTypeFromString(rafString);
         }
