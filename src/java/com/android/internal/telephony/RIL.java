@@ -340,7 +340,7 @@ public class RIL extends BaseCommands implements CommandsInterface {
     /* Custom Radio Access Family (RAF)
      * Handle RAF in unified device trees (CDMA+GSM variants, unique source)
      */
-    private String DEVICE_FAMILY = SystemProperties.get("ro.ril.device_family");
+    private String DEVICE_FAMILY = SystemProperties.get("telephony.radioAccessFamily");
     private static final String[] RAF_VALUES = {"GSM|WCDMA|LTE", "LTE|CDMA|EVDO"};
 
     private final DisplayManager.DisplayListener mDisplayListener =
