@@ -33,7 +33,6 @@ import org.mockito.Mock;
 import static org.mockito.Mockito.*;
 import org.mockito.MockitoAnnotations;
 import org.junit.After;
-import static org.junit.Assert.assertEquals;
 import org.junit.Before;
 import org.junit.Test;
 import com.android.internal.telephony.TelephonyTest;
@@ -52,7 +51,6 @@ public class IccRecordsTest extends TelephonyTest {
 
     private IccRecords mIccRecords;
 
-    private SIMFileHandler mSIMFileHandler;
     private SIMRecordsExt mSimRecordsExt;
     private static final int EVENT_GET_MWIS_DONE = 7;
     private static final int EVENT_GET_VOICE_MAIL_INDICATOR_CPHS_DONE = 8;
@@ -84,7 +82,6 @@ public class IccRecordsTest extends TelephonyTest {
         @Override
         public void onLooperPrepared() {
             mIccRecords = new SIMRecords(mUiccCardApplication3gpp, mContext, mMockCI);
-            mSIMFileHandler = new SIMFileHandler(mUiccCardApplication3gpp, null, mMockCI);
             mSimRecordsExt = new SIMRecordsExt(mUiccCardApplication3gpp, mContext, mMockCI);
             setReady(true);
         }
@@ -113,13 +110,6 @@ public class IccRecordsTest extends TelephonyTest {
         // verify called within dispose
         verify(mMockCI).unregisterForIccRefresh(any(IccRecords.class));
 
-    }
-
-   @Test
-    public void testgetPLMNWACTFilePath() {
-        String filePath = mSIMFileHandler.getEFPath(IccConstants.EF_PLMNWACT);
-        String expectedfilePath = IccConstants.MF_SIM + IccConstants.DF_GSM;
-        assertEquals(expectedfilePath, filePath);
     }
 
     @Test
