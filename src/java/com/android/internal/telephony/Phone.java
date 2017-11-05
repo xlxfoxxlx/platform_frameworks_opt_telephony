@@ -23,6 +23,7 @@ import android.content.IntentFilter;
 import android.content.SharedPreferences;
 import android.net.LinkProperties;
 import android.net.NetworkCapabilities;
+import android.net.NetworkStats;
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.AsyncResult;
@@ -31,6 +32,7 @@ import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.Message;
+import android.os.PersistableBundle;
 import android.os.Registrant;
 import android.os.RegistrantList;
 import android.os.SystemProperties;
@@ -39,11 +41,13 @@ import android.preference.PreferenceManager;
 import android.provider.Settings;
 import android.service.carrier.CarrierIdentifier;
 import android.telecom.VideoProfile;
+import android.telephony.CarrierConfigManager;
 import android.telephony.CellIdentityCdma;
 import android.telephony.CellInfo;
 import android.telephony.CellInfoCdma;
 import android.telephony.CellLocation;
 import android.telephony.ClientRequestStats;
+import android.telephony.ImsiEncryptionInfo;
 import android.telephony.PhoneStateListener;
 import android.telephony.RadioAccessFamily;
 import android.telephony.Rlog;
@@ -58,7 +62,6 @@ import com.android.ims.ImsConfig;
 import com.android.ims.ImsManager;
 import com.android.internal.R;
 import com.android.internal.telephony.dataconnection.DcTracker;
-import com.android.internal.telephony.imsphone.ImsPhone;
 import com.android.internal.telephony.imsphone.ImsPhoneCall;
 import com.android.internal.telephony.test.SimulatedRadioControl;
 import com.android.internal.telephony.uicc.IccCardApplicationStatus.AppType;
@@ -140,6 +143,9 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
     // Key used to read/write "disable data connection on boot" pref (used for testing)
     public static final String DATA_DISABLED_ON_BOOT_KEY = "disabled_on_boot_key";
 
+    // Key used to read/write data_roaming_is_user_setting pref
+    public static final String DATA_ROAMING_IS_USER_SETTING_KEY = "data_roaming_is_user_setting_key";
+
     /* Event Constants */
     protected static final int EVENT_RADIO_AVAILABLE             = 1;
     /** Supplementary Service Notification received. */
@@ -193,8 +199,9 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
     protected static final int EVENT_CARRIER_CONFIG_CHANGED         = 43;
     // Carrier's CDMA prefer mode setting
     protected static final int EVENT_SET_ROAMING_PREFERENCE_DONE    = 44;
+    protected static final int EVENT_MODEM_RESET                    = 45;
 
-    protected static final int EVENT_LAST                       = EVENT_SET_ROAMING_PREFERENCE_DONE;
+    protected static final int EVENT_LAST                       = EVENT_MODEM_RESET;
 
     // For shared prefs.
     private static final String GSM_ROAMING_LIST_OVERRIDE_PREFIX = "gsm_roaming_list_";
@@ -219,6 +226,12 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
     private static final String DNS_SERVER_CHECK_DISABLED_KEY = "dns_server_check_disabled_key";
 
     /**
+     * This method is invoked when the Phone exits Emergency Callback Mode.
+     */
+    protected void handleExitEmergencyCallbackMode() {
+    }
+
+    /**
      * Small container class used to hold information relevant to
      * the carrier selection process. operatorNumeric can be ""
      * if we are looking for automatic selection. operatorAlphaLong is the
@@ -237,9 +250,9 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
     private boolean mDnsCheckDisabled;
     public DcTracker mDcTracker;
     /* Used for dispatching signals to configured carrier apps */
-    private CarrierSignalAgent mCarrierSignalAgent;
+    protected CarrierSignalAgent mCarrierSignalAgent;
     /* Used for dispatching carrier action from carrier apps */
-    private CarrierActionAgent mCarrierActionAgent;
+    protected CarrierActionAgent mCarrierActionAgent;
     private boolean mDoesRilSendMultipleCallRing;
     private int mCallRingContinueToken;
     private int mCallRingDelay;
@@ -521,8 +534,6 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
         mSmsUsageMonitor = mTelephonyComponentFactory.makeSmsUsageMonitor(context);
         mUiccController = UiccController.getInstance();
         mUiccController.registerForIccChanged(this, EVENT_ICC_CHANGED, null);
-        mCarrierSignalAgent = mTelephonyComponentFactory.makeCarrierSignalAgent(this);
-        mCarrierActionAgent = mTelephonyComponentFactory.makeCarrierActionAgent(this);
         mSimActivationTracker = mTelephonyComponentFactory.makeSimActivationTracker(this);
         if (getPhoneType() != PhoneConstants.PHONE_TYPE_SIP) {
             mCi.registerForSrvccStateChanged(this, EVENT_SRVCC_STATE_CHANGED, null);
@@ -561,9 +572,32 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
                 if (imsManager.isDynamicBinding() || imsManager.isServiceAvailable()) {
                     mImsServiceReady = true;
                     updateImsPhone();
-                    ImsManager.updateImsServiceConfig(mContext, mPhoneId, false);
                 }
             }
+        }
+    }
+
+    /**
+     * Checks if device should convert CDMA Caller ID restriction related MMI codes to
+     * equivalent 3GPP MMI Codes that provide same functionality when device is roaming.
+     * This method should only return true on multi-mode devices when carrier requires this
+     * conversion to be done on the device.
+     *
+     * @return true when carrier config
+     * "KEY_CONVERT_CDMA_CALLER_ID_MMI_CODES_WHILE_ROAMING_ON_3GPP_BOOL" is set to true
+     */
+    public boolean supportsConversionOfCdmaCallerIdMmiCodesWhileRoaming() {
+        CarrierConfigManager configManager = (CarrierConfigManager)
+                getContext().getSystemService(Context.CARRIER_CONFIG_SERVICE);
+        PersistableBundle b = configManager.getConfig();
+        if (b != null) {
+            return b.getBoolean(
+                    CarrierConfigManager
+                            .KEY_CONVERT_CDMA_CALLER_ID_MMI_CODES_WHILE_ROAMING_ON_3GPP_BOOL,
+                    false);
+        } else {
+            // Default value set in CarrierConfigManager
+            return false;
         }
     }
 
@@ -2157,8 +2191,6 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
      * @return {@code true} if we are in emergency call back mode. This is a period where the phone
      * should be using as little power as possible and be ready to receive an incoming call from the
      * emergency operator.
-     *
-     * This method is overridden for GSM phones to return false always
      */
     public boolean isInEcm() {
         return mIsPhoneInEcmState;
@@ -2757,18 +2789,9 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
     /**
      * Report on whether data connectivity is allowed.
      */
-    public boolean isDataConnectivityPossible() {
-        return isDataConnectivityPossible(PhoneConstants.APN_TYPE_DEFAULT);
+    public boolean isDataAllowed() {
+        return ((mDcTracker != null) && (mDcTracker.isDataAllowed(null)));
     }
-
-    /**
-     * Report on whether data connectivity is allowed for an APN.
-     */
-    public boolean isDataConnectivityPossible(String apnType) {
-        return ((mDcTracker != null) &&
-                (mDcTracker.isDataPossible(apnType)));
-    }
-
 
     /**
      * Action set from carrier signalling broadcast receivers to enable/disable metered apns.
@@ -2782,6 +2805,13 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
      */
     public void carrierActionSetRadioEnabled(boolean enabled) {
         mCarrierActionAgent.carrierActionSetRadioEnabled(enabled);
+    }
+
+    /**
+     * Action set from carrier app to start/stop reporting default network condition.
+     */
+    public void carrierActionReportDefaultNetworkStatus(boolean report) {
+        mCarrierActionAgent.carrierActionReportDefaultNetworkStatus(report);
     }
 
     /**
@@ -2956,6 +2986,28 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
      */
     public Phone getImsPhone() {
         return mImsPhone;
+    }
+
+    /**
+     * Returns Carrier specific information that will be used to encrypt the IMSI and IMPI.
+     * @param keyType whether the key is being used for WLAN or ePDG.
+     * @return ImsiEncryptionInfo which includes the Key Type, the Public Key
+     *        {@link java.security.PublicKey} and the Key Identifier.
+     *        The keyIdentifier This is used by the server to help it locate the private key to
+     *        decrypt the permanent identity.
+     */
+    public ImsiEncryptionInfo getCarrierInfoForImsiEncryption(int keyType) {
+        return null;
+    }
+
+    /**
+     * Sets the carrier information needed to encrypt the IMSI and IMPI.
+     * @param imsiEncryptionInfo Carrier specific information that will be used to encrypt the
+     *        IMSI and IMPI. This includes the Key type, the Public key
+     *        {@link java.security.PublicKey} and the Key identifier.
+     */
+    public void setCarrierInfoForImsiEncryption(ImsiEncryptionInfo imsiEncryptionInfo) {
+        return;
     }
 
     /**
@@ -3297,14 +3349,25 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
     }
 
     /**
+     * Determines if the connection to IMS services are available yet.
+     * @return {@code true} if the connection to IMS services are available.
+     */
+    public boolean isImsAvailable() {
+        if (mImsPhone == null) {
+            return false;
+        }
+
+        return mImsPhone.isImsAvailable();
+    }
+
+    /**
      * Determines if video calling is enabled for the phone.
      *
      * @return {@code true} if video calling is enabled, {@code false} otherwise.
      */
     public boolean isVideoEnabled() {
         Phone imsPhone = mImsPhone;
-        if ((imsPhone != null)
-                && (imsPhone.getServiceState().getState() == ServiceState.STATE_IN_SERVICE)) {
+        if (imsPhone != null) {
             return imsPhone.isVideoEnabled();
         }
         return false;
@@ -3413,7 +3476,7 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
                             ImsConfig.WfcModeFeatureValueConstants.WIFI_ONLY));
             if (wfcWiFiOnly) {
                 throw new CallStateException(
-                        CallStateException.ERROR_DISCONNECTED,
+                        CallStateException.ERROR_OUT_OF_SERVICE,
                         "WFC Wi-Fi Only Mode: IMS not registered");
             }
         }
@@ -3448,9 +3511,16 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
         return this;
     }
 
-    public long getVtDataUsage() {
-        if (mImsPhone == null) return 0;
-        return mImsPhone.getVtDataUsage();
+    /**
+     * Get aggregated video call data usage since boot.
+     * Permissions android.Manifest.permission.READ_NETWORK_USAGE_HISTORY is required.
+     *
+     * @param perUidStats True if requesting data usage per uid, otherwise overall usage.
+     * @return Snapshot of video call data usage
+     */
+    public NetworkStats getVtDataUsage(boolean perUidStats) {
+        if (mImsPhone == null) return null;
+        return mImsPhone.getVtDataUsage(perUidStats);
     }
 
     /**
@@ -3475,11 +3545,14 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
     }
 
     /**
-     * Set SIM card power state. Request is equivalent to inserting or removing the card.
-     * @param powerUp True if powering up the SIM, otherwise powering down
+     * Set SIM card power state.
+     * @param state State of SIM (power down, power up, pass through)
+     * - {@link android.telephony.TelephonyManager#CARD_POWER_DOWN}
+     * - {@link android.telephony.TelephonyManager#CARD_POWER_UP}
+     * - {@link android.telephony.TelephonyManager#CARD_POWER_UP_PASS_THROUGH}
      **/
-    public void setSimPowerState(boolean powerUp) {
-        mCi.setSimCardPower(powerUp, null);
+    public void setSimPowerState(int state) {
+        mCi.setSimCardPower(state, null);
     }
 
     public void dump(FileDescriptor fd, PrintWriter pw, String[] args) {
@@ -3516,7 +3589,6 @@ public abstract class Phone extends Handler implements PhoneInternalInterface {
         pw.println(" getPhoneType()=" + getPhoneType());
         pw.println(" getVoiceMessageCount()=" + getVoiceMessageCount());
         pw.println(" getActiveApnTypes()=" + getActiveApnTypes());
-        pw.println(" isDataConnectivityPossible()=" + isDataConnectivityPossible());
         pw.println(" needsOtaServiceProvisioning=" + needsOtaServiceProvisioning());
         pw.flush();
         pw.println("++++++++++++++++++++++++++++++++");

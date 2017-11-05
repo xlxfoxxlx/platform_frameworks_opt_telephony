@@ -467,9 +467,18 @@ public class DataConnection extends StateMachine {
 
         DataProfile dp = new DataProfile(mApnSetting, cp.mProfileId);
 
-        mPhone.mCi.setupDataCall(cp.mRilRat, dp,
-                mPhone.getServiceState().getDataRoamingFromRegistration(),
-                mPhone.getDataRoamingEnabled(), msg);
+        // We need to use the actual modem roaming state instead of the framework roaming state
+        // here. This flag is only passed down to ril_service for picking the correct protocol (for
+        // old modem backward compatibility).
+        boolean isModemRoaming = mPhone.getServiceState().getDataRoamingFromRegistration();
+
+        // Set this flag to true if the user turns on data roaming. Or if we override the roaming
+        // state in framework, we should set this flag to true as well so the modem will not reject
+        // the data call setup (because the modem actually thinks the device is roaming).
+        boolean allowRoaming = mPhone.getDataRoamingEnabled()
+                || (isModemRoaming && !mPhone.getServiceState().getDataRoaming());
+
+        mPhone.mCi.setupDataCall(cp.mRilRat, dp, isModemRoaming, allowRoaming, msg);
     }
 
     /**
@@ -491,21 +500,12 @@ public class DataConnection extends StateMachine {
                 discReason = RILConstants.DEACTIVATE_REASON_PDP_RESET;
             }
         }
-        if (mPhone.mCi.getRadioState().isOn()
-                || (mPhone.getServiceState().getRilDataRadioTechnology()
-                        == ServiceState.RIL_RADIO_TECHNOLOGY_IWLAN )) {
-            String str = "tearDownData radio is on, call deactivateDataCall";
-            if (DBG) log(str);
-            if (apnContext != null) apnContext.requestLog(str);
-            mPhone.mCi.deactivateDataCall(mCid, discReason,
-                    obtainMessage(EVENT_DEACTIVATE_DONE, mTag, 0, o));
-        } else {
-            String str = "tearDownData radio is off sendMessage EVENT_DEACTIVATE_DONE immediately";
-            if (DBG) log(str);
-            if (apnContext != null) apnContext.requestLog(str);
-            AsyncResult ar = new AsyncResult(o, null, null);
-            sendMessage(obtainMessage(EVENT_DEACTIVATE_DONE, mTag, 0, ar));
-        }
+
+        String str = "tearDownData. mCid=" + mCid + ", reason=" + discReason;
+        if (DBG) log(str);
+        if (apnContext != null) apnContext.requestLog(str);
+        mPhone.mCi.deactivateDataCall(mCid, discReason,
+                obtainMessage(EVENT_DEACTIVATE_DONE, mTag, 0, o));
     }
 
     private void notifyAllWithEvent(ApnContext alreadySent, int event, String reason) {
@@ -852,8 +852,7 @@ public class DataConnection extends StateMachine {
 
         // Do we need a restricted network to satisfy the request?
         // Is this network metered?  If not, then don't add restricted
-        if (!mApnSetting.isMetered(mPhone.getContext(), mPhone.getSubId(),
-                mPhone.getServiceState().getDataRoaming())) {
+        if (!mApnSetting.isMetered(mPhone)) {
             return;
         }
 
@@ -869,9 +868,7 @@ public class DataConnection extends StateMachine {
             for (String type : mApnSetting.types) {
                 if (!mRestrictedNetworkOverride
                         && (mConnectionParams != null && mConnectionParams.mUnmeteredUseOnly)
-                        && ApnSetting.isMeteredApnType(type,
-                        mPhone.getContext(), mPhone.getSubId(),
-                        mPhone.getServiceState().getDataRoaming())) {
+                        && ApnSetting.isMeteredApnType(type, mPhone)) {
                     log("Dropped the metered " + type + " for the unmetered data call.");
                     continue;
                 }
@@ -934,8 +931,7 @@ public class DataConnection extends StateMachine {
             // 2. The non-restricted data and is intended for unmetered use only.
             if (((mConnectionParams != null && mConnectionParams.mUnmeteredUseOnly)
                     && !mRestrictedNetworkOverride)
-                    || !mApnSetting.isMetered(mPhone.getContext(), mPhone.getSubId(),
-                    mPhone.getServiceState().getDataRoaming())) {
+                    || !mApnSetting.isMetered(mPhone)) {
                 result.addCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED);
                 mNetworkInfo.setMetered(false);
             } else {
@@ -1053,7 +1049,7 @@ public class DataConnection extends StateMachine {
             mPhone.getServiceStateTracker().registerForDataRoamingOn(getHandler(),
                     DataConnection.EVENT_DATA_CONNECTION_ROAM_ON, null);
             mPhone.getServiceStateTracker().registerForDataRoamingOff(getHandler(),
-                    DataConnection.EVENT_DATA_CONNECTION_ROAM_OFF, null);
+                    DataConnection.EVENT_DATA_CONNECTION_ROAM_OFF, null, true);
 
             // Add ourselves to the list of data connections
             mDcController.addDc(DataConnection.this);
@@ -1541,34 +1537,23 @@ public class DataConnection extends StateMachine {
 
             // verify and get updated information in case these things
             // are obsolete
-            {
-                ServiceState ss = mPhone.getServiceState();
-                final int networkType = ss.getDataNetworkType();
-                if (mNetworkInfo.getSubtype() != networkType) {
-                    log("DcActiveState with incorrect subtype (" + mNetworkInfo.getSubtype() +
-                            ", " + networkType + "), updating.");
-                }
-                mNetworkInfo.setSubtype(networkType, TelephonyManager.getNetworkTypeName(networkType));
-                final boolean roaming = ss.getDataRoaming();
-                if (roaming != mNetworkInfo.isRoaming()) {
-                    log("DcActiveState with incorrect roaming (" + mNetworkInfo.isRoaming() +
-                            ", " + roaming +"), updating.");
-                }
-                mNetworkInfo.setRoaming(roaming);
+            ServiceState ss = mPhone.getServiceState();
+            final int networkType = ss.getDataNetworkType();
+            if (mNetworkInfo.getSubtype() != networkType) {
+                log("DcActiveState with incorrect subtype (" + mNetworkInfo.getSubtype()
+                        + ", " + networkType + "), updating.");
+            }
+            mNetworkInfo.setSubtype(networkType, TelephonyManager.getNetworkTypeName(networkType));
+            final boolean roaming = ss.getDataRoaming();
+            if (roaming != mNetworkInfo.isRoaming()) {
+                log("DcActiveState with incorrect roaming (" + mNetworkInfo.isRoaming()
+                        + ", " + roaming + "), updating.");
             }
 
-            boolean createNetworkAgent = true;
-            // If a disconnect is already pending, avoid notifying all of connected
-            if (hasMessages(EVENT_DISCONNECT) ||
-                    hasMessages(EVENT_DISCONNECT_ALL) ||
-                    hasDeferredMessages(EVENT_DISCONNECT) ||
-                    hasDeferredMessages(EVENT_DISCONNECT_ALL)) {
-                log("DcActiveState: skipping notifyAllOfConnected()");
-                createNetworkAgent = false;
-            } else {
-                // If we were retrying there maybe more than one, otherwise they'll only be one.
-                notifyAllOfConnected(Phone.REASON_CONNECTED);
-            }
+            mNetworkInfo.setRoaming(roaming);
+
+            // If we were retrying there maybe more than one, otherwise they'll only be one.
+            notifyAllOfConnected(Phone.REASON_CONNECTED);
 
             mPhone.getCallTracker().registerForVoiceCallStarted(getHandler(),
                     DataConnection.EVENT_DATA_CONNECTION_VOICE_CALL_STARTED, null);
@@ -1593,12 +1578,10 @@ public class DataConnection extends StateMachine {
             }
             misc.subscriberId = mPhone.getSubscriberId();
 
-            if (createNetworkAgent) {
-                setNetworkRestriction();
-                mNetworkAgent = new DcNetworkAgent(getHandler().getLooper(), mPhone.getContext(),
-                        "DcNetworkAgent", mNetworkInfo, getNetworkCapabilities(), mLinkProperties,
-                        50, misc);
-            }
+            setNetworkRestriction();
+            mNetworkAgent = new DcNetworkAgent(getHandler().getLooper(), mPhone.getContext(),
+                    "DcNetworkAgent", mNetworkInfo, getNetworkCapabilities(), mLinkProperties,
+                    50, misc);
         }
 
         @Override
